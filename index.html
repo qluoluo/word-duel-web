@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>猜词对战 - 手机网页版</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div class="bg-layer"></div>
+    <main class="app-shell">
+      <header class="hero">
+        <h1>猜词对战</h1>
+        <p>双人实时联机 · 手机浏览器可直接玩</p>
+      </header>
+
+      <section class="card" id="config-card">
+        <h2>连接设置</h2>
+        <p class="muted">第一次使用需要输入 Supabase 项目 URL 和 anon key，输入后会自动保存在本机浏览器。</p>
+        <div class="form-grid">
+          <label>
+            <span>Supabase URL</span>
+            <input id="supabase-url" type="text" placeholder="https://xxxx.supabase.co" />
+          </label>
+          <label>
+            <span>Supabase anon key</span>
+            <input id="supabase-key" type="text" placeholder="eyJhbGciOi..." />
+          </label>
+        </div>
+        <div class="row-actions">
+          <button id="connect-btn" class="btn primary">连接</button>
+          <button id="clear-config-btn" class="btn ghost">清空配置</button>
+          <span id="connect-status" class="tag offline">未连接</span>
+        </div>
+      </section>
+
+      <section class="card" id="lobby-card">
+        <h2>大厅</h2>
+        <div class="form-grid">
+          <label>
+            <span>你的昵称</span>
+            <input id="nickname" type="text" maxlength="20" placeholder="例如：小李" />
+          </label>
+        </div>
+
+        <div class="split-grid">
+          <div class="block">
+            <h3>创建房间</h3>
+            <label>
+              <span>单词长度（3-12）</span>
+              <input id="word-length" type="number" min="3" max="12" value="5" />
+            </label>
+            <button id="create-room-btn" class="btn primary">创建房间</button>
+          </div>
+
+          <div class="block">
+            <h3>加入房间</h3>
+            <label>
+              <span>房间码</span>
+              <input id="room-code" type="text" maxlength="6" placeholder="例如：7KQ2NP" />
+            </label>
+            <button id="join-room-btn" class="btn">加入房间</button>
+          </div>
+        </div>
+
+        <p id="lobby-message" class="message info">先连接数据库，再创建或加入房间。</p>
+      </section>
+
+      <section class="card hidden" id="room-card">
+        <div class="room-top">
+          <div>
+            <h2>房间 <strong id="room-code-show">------</strong></h2>
+            <p id="room-meta" class="muted">状态加载中...</p>
+          </div>
+          <div class="row-actions compact">
+            <button id="copy-room-btn" class="btn">复制房间码</button>
+            <button id="leave-room-btn" class="btn danger">离开房间</button>
+          </div>
+        </div>
+
+        <div class="stats" id="room-stats"></div>
+
+        <div class="split-grid room-actions-grid">
+          <div class="block">
+            <h3>提交秘密单词</h3>
+            <label>
+              <span>你的秘密单词</span>
+              <input id="secret-word" type="password" placeholder="只允许英文字母" />
+            </label>
+            <button id="submit-secret-btn" class="btn primary">提交密词</button>
+          </div>
+
+          <div class="block">
+            <h3>开始猜词</h3>
+            <label>
+              <span>你的猜词</span>
+              <input id="guess-word" type="text" placeholder="输入英文字母" />
+            </label>
+            <button id="submit-guess-btn" class="btn primary">提交猜词</button>
+          </div>
+        </div>
+
+        <p id="room-message" class="message info">等待房间同步...</p>
+
+        <div class="split-grid history-grid">
+          <div class="block">
+            <h3>我的猜词记录</h3>
+            <div id="my-guesses" class="guess-list empty">暂无记录</div>
+          </div>
+          <div class="block">
+            <h3>对方猜词记录</h3>
+            <div id="opponent-guesses" class="guess-list empty">暂无记录</div>
+          </div>
+        </div>
+
+        <div class="legend">
+          <span><i class="tile correct"></i> 位置和字母都正确</span>
+          <span><i class="tile present"></i> 字母正确但位置错误</span>
+          <span><i class="tile absent"></i> 字母不存在</span>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
