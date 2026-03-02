@@ -26,10 +26,13 @@ python3 -m http.server 8080
 
 浏览器打开 `http://localhost:8080`，在页面输入：
 
-- Supabase URL
-- Supabase anon key
+- 访问密码（默认：`5201314`）
 
-然后点击“连接”。
+输入密码后会自动连接，不需要手动填 URL/key。
+
+如果你要改密码，编辑：
+
+- `app.js` 里的 `APP_PRESET.accessPassword`
 
 ## 3. 联机流程
 
@@ -52,3 +55,4 @@ python3 -m http.server 8080
 
 - `anon key` 可以放前端，真正安全靠 RLS 和 RPC。
 - 不要把 `service_role key` 放到前端。
+- 这个“网页访问密码”只是便捷入口，不是强安全（因为前端代码可被查看）。

@@ -22,9 +22,26 @@
         <p>双人实时联机 · 手机浏览器可直接玩</p>
       </header>
 
-      <section class="card" id="config-card">
-        <h2>连接设置</h2>
-        <p class="muted">第一次使用需要输入 Supabase 项目 URL 和 anon key，输入后会自动保存在本机浏览器。</p>
+      <section class="card" id="login-card">
+        <h2>密码登录</h2>
+        <p class="muted">输入访问密码后自动连接，不需要再手动输入一堆配置。</p>
+        <div class="form-grid">
+          <label>
+            <span>访问密码</span>
+            <input id="access-password" type="password" placeholder="输入你们约定的密码" />
+          </label>
+        </div>
+        <div class="row-actions">
+          <button id="quick-login-btn" class="btn primary">登录</button>
+          <button id="toggle-config-btn" class="btn ghost">显示高级设置</button>
+          <span id="login-status" class="tag offline">未登录</span>
+        </div>
+        <p id="access-message" class="message info">请输入访问密码。</p>
+      </section>
+
+      <section class="card hidden" id="config-card">
+        <h2>高级设置（可选）</h2>
+        <p class="muted">通常不需要改。只有调试或更换 Supabase 项目时才使用。</p>
         <div class="form-grid">
           <label>
             <span>Supabase URL</span>

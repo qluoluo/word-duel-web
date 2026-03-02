@@ -5,6 +5,15 @@ const STORAGE_KEYS = {
   supabaseAnonKey: 'word_duel_supabase_anon_key',
   session: 'word_duel_session',
   nickname: 'word_duel_nickname',
+  accessGranted: 'word_duel_access_granted',
+};
+
+// 你可以在这里改成自己的项目信息
+const APP_PRESET = {
+  supabaseUrl: 'https://xbjvmbsqcyuixifcoujx.supabase.co',
+  supabaseAnonKey:
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhianZtYnNxY3l1aXhpZmNvdWp4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI0NTgyMTgsImV4cCI6MjA4ODAzNDIxOH0.-0froa2JgaCmSlDnnTaLO-CewdpyyeiH79JvGTCiRcU',
+  accessPassword: '5201314',
 };
 
 const ROOM_SELECT_COLUMNS = [
@@ -33,9 +42,19 @@ const state = {
   room: null,
   guesses: [],
   roomBusy: false,
+  accessGranted: false,
+  showConfig: false,
 };
 
 const els = {
+  loginCard: document.getElementById('login-card'),
+  accessPassword: document.getElementById('access-password'),
+  quickLoginBtn: document.getElementById('quick-login-btn'),
+  toggleConfigBtn: document.getElementById('toggle-config-btn'),
+  loginStatus: document.getElementById('login-status'),
+  accessMessage: document.getElementById('access-message'),
+
+  configCard: document.getElementById('config-card'),
   supabaseUrl: document.getElementById('supabase-url'),
   supabaseKey: document.getElementById('supabase-key'),
   connectBtn: document.getElementById('connect-btn'),
@@ -70,12 +89,19 @@ const els = {
 
 bindEvents();
 restoreCachedInputs();
+state.accessGranted = localStorage.getItem(STORAGE_KEYS.accessGranted) === '1';
+setLoginStatus(state.accessGranted);
 setConnectStatus(false);
 renderScene();
-autoConnectIfPossible();
+if (state.accessGranted) {
+  autoConnectIfPossible();
+}
 
 function bindEvents() {
-  els.connectBtn.addEventListener('click', connectSupabase);
+  els.quickLoginBtn.addEventListener('click', quickLogin);
+  els.toggleConfigBtn.addEventListener('click', toggleAdvancedConfig);
+
+  els.connectBtn.addEventListener('click', () => connectSupabase());
   els.clearConfigBtn.addEventListener('click', clearConfig);
 
   els.createRoomBtn.addEventListener('click', createRoom);
@@ -89,21 +115,63 @@ function bindEvents() {
 }
 
 function restoreCachedInputs() {
-  els.supabaseUrl.value = localStorage.getItem(STORAGE_KEYS.supabaseUrl) || '';
-  els.supabaseKey.value = localStorage.getItem(STORAGE_KEYS.supabaseAnonKey) || '';
+  els.supabaseUrl.value = localStorage.getItem(STORAGE_KEYS.supabaseUrl) || APP_PRESET.supabaseUrl;
+  els.supabaseKey.value = localStorage.getItem(STORAGE_KEYS.supabaseAnonKey) || APP_PRESET.supabaseAnonKey;
   els.nickname.value = localStorage.getItem(STORAGE_KEYS.nickname) || '';
 }
 
-async function autoConnectIfPossible() {
-  const url = els.supabaseUrl.value.trim();
-  const key = els.supabaseKey.value.trim();
-  if (!url || !key) return;
-  await connectSupabase();
+function toggleAdvancedConfig() {
+  state.showConfig = !state.showConfig;
+  renderScene();
 }
 
-async function connectSupabase() {
+async function quickLogin() {
+  const pass = els.accessPassword.value.trim();
+  if (!pass) {
+    setAccessMessage('请输入访问密码。', 'error');
+    return;
+  }
+
+  if (pass !== APP_PRESET.accessPassword) {
+    setAccessMessage('密码错误，请重试。', 'error');
+    return;
+  }
+
+  state.accessGranted = true;
+  localStorage.setItem(STORAGE_KEYS.accessGranted, '1');
+  setLoginStatus(true);
+
+  if (!els.supabaseUrl.value.trim()) {
+    els.supabaseUrl.value = APP_PRESET.supabaseUrl;
+  }
+  if (!els.supabaseKey.value.trim()) {
+    els.supabaseKey.value = APP_PRESET.supabaseAnonKey;
+  }
+
+  localStorage.setItem(STORAGE_KEYS.supabaseUrl, els.supabaseUrl.value.trim());
+  localStorage.setItem(STORAGE_KEYS.supabaseAnonKey, els.supabaseKey.value.trim());
+
+  setAccessMessage('密码正确，正在连接服务...', 'success');
+  renderScene();
+  await autoConnectIfPossible();
+}
+
+async function autoConnectIfPossible() {
+  if (!state.accessGranted) return;
+
   const url = els.supabaseUrl.value.trim();
-  const anonKey = els.supabaseKey.value.trim();
+  const key = els.supabaseKey.value.trim();
+  if (!url || !key) {
+    setLobbyMessage('未找到连接配置，请打开高级设置补充。', 'error');
+    return;
+  }
+
+  await connectSupabase(url, key);
+}
+
+async function connectSupabase(urlOverride, keyOverride) {
+  const url = (urlOverride || els.supabaseUrl.value.trim()).trim();
+  const anonKey = (keyOverride || els.supabaseKey.value.trim()).trim();
 
   if (!url || !anonKey) {
     setLobbyMessage('请先填写 Supabase URL 和 anon key。', 'error');
@@ -128,13 +196,18 @@ async function connectSupabase() {
     state.supabase = client;
     state.connected = true;
     state.userId = uid;
+    state.accessGranted = true;
 
+    localStorage.setItem(STORAGE_KEYS.accessGranted, '1');
     localStorage.setItem(STORAGE_KEYS.supabaseUrl, url);
     localStorage.setItem(STORAGE_KEYS.supabaseAnonKey, anonKey);
 
+    setLoginStatus(true);
     setConnectStatus(true);
+    setAccessMessage('登录成功。', 'success');
     setLobbyMessage('连接成功，可以创建或加入房间。', 'success');
 
+    renderScene();
     await restoreRoomSessionIfAny();
   } catch (err) {
     state.supabase = null;
@@ -142,6 +215,7 @@ async function connectSupabase() {
     state.userId = null;
     setConnectStatus(false);
     setLobbyMessage(`连接失败：${friendlyError(err)}`, 'error');
+    setAccessMessage(`连接失败：${friendlyError(err)}`, 'error');
   } finally {
     setConnectBusy(false);
   }
@@ -185,27 +259,43 @@ async function clearConfig() {
   state.room = null;
   state.guesses = [];
   state.roomBusy = false;
+  state.accessGranted = false;
+  state.showConfig = false;
 
   localStorage.removeItem(STORAGE_KEYS.supabaseUrl);
   localStorage.removeItem(STORAGE_KEYS.supabaseAnonKey);
   localStorage.removeItem(STORAGE_KEYS.session);
+  localStorage.removeItem(STORAGE_KEYS.accessGranted);
 
-  els.supabaseUrl.value = '';
-  els.supabaseKey.value = '';
+  els.supabaseUrl.value = APP_PRESET.supabaseUrl;
+  els.supabaseKey.value = APP_PRESET.supabaseAnonKey;
+  els.accessPassword.value = '';
 
+  setLoginStatus(false);
   setConnectStatus(false);
+  setAccessMessage('已退出，请重新输入密码。', 'info');
   renderScene();
-  setLobbyMessage('配置已清空，请重新输入并连接。', 'info');
+  setLobbyMessage('配置已清空。', 'info');
 }
 
 function setConnectBusy(busy) {
+  els.quickLoginBtn.disabled = busy;
   els.connectBtn.disabled = busy;
   els.clearConfigBtn.disabled = busy;
+}
+
+function setLoginStatus(online) {
+  els.loginStatus.textContent = online ? '已登录' : '未登录';
+  els.loginStatus.className = `tag ${online ? 'online' : 'offline'}`;
 }
 
 function setConnectStatus(online) {
   els.connectStatus.textContent = online ? '已连接' : '未连接';
   els.connectStatus.className = `tag ${online ? 'online' : 'offline'}`;
+}
+
+function setAccessMessage(text, type) {
+  setMessage(els.accessMessage, text, type);
 }
 
 async function restoreRoomSessionIfAny() {
@@ -239,7 +329,7 @@ function validateNickname() {
 
 function ensureConnected() {
   if (!state.connected || !state.supabase || !state.userId) {
-    setLobbyMessage('请先连接 Supabase。', 'error');
+    setLobbyMessage('连接未就绪，请稍后重试或打开高级设置手动连接。', 'error');
     return false;
   }
   return true;
@@ -326,7 +416,7 @@ function rpcPayload(data) {
 
 function normalizeRpcError(error) {
   if (error?.code === 'PGRST202') {
-    return new Error('缺少安全函数。请在 Supabase SQL Editor 执行 supabase/schema_secure.sql。');
+    return new Error('缺少安全函数。请在 Supabase SQL Editor 执行 schema_secure.sql。');
   }
   return error;
 }
@@ -486,6 +576,20 @@ async function refreshGuesses() {
 
 function renderScene() {
   const inRoom = !!state.session;
+  const unlocked = state.accessGranted;
+
+  els.loginCard.classList.toggle('hidden', unlocked);
+
+  const showConfigCard = state.showConfig && !inRoom;
+  els.configCard.classList.toggle('hidden', !showConfigCard);
+  els.toggleConfigBtn.textContent = state.showConfig ? '隐藏高级设置' : '显示高级设置';
+
+  if (!unlocked) {
+    els.lobbyCard.classList.add('hidden');
+    els.roomCard.classList.add('hidden');
+    return;
+  }
+
   els.lobbyCard.classList.toggle('hidden', inRoom);
   els.roomCard.classList.toggle('hidden', !inRoom);
 
