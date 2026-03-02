@@ -7,11 +7,27 @@ const STORAGE_KEYS = {
   nickname: 'word_duel_nickname',
 };
 
-const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const ROOM_SELECT_COLUMNS = [
+  'id',
+  'room_code',
+  'word_length',
+  'host_uid',
+  'guest_uid',
+  'host_name',
+  'guest_name',
+  'host_secret_set',
+  'guest_secret_set',
+  'host_solved_attempt',
+  'guest_solved_attempt',
+  'status',
+  'created_at',
+  'updated_at',
+].join(',');
 
 const state = {
   supabase: null,
   connected: false,
+  userId: null,
   channel: null,
   session: null,
   room: null,
@@ -56,14 +72,6 @@ bindEvents();
 restoreCachedInputs();
 setConnectStatus(false);
 renderScene();
-
-async function autoConnectIfPossible() {
-  const url = els.supabaseUrl.value.trim();
-  const key = els.supabaseKey.value.trim();
-  if (!url || !key) return;
-  await connectSupabase();
-}
-
 autoConnectIfPossible();
 
 function bindEvents() {
@@ -86,6 +94,13 @@ function restoreCachedInputs() {
   els.nickname.value = localStorage.getItem(STORAGE_KEYS.nickname) || '';
 }
 
+async function autoConnectIfPossible() {
+  const url = els.supabaseUrl.value.trim();
+  const key = els.supabaseKey.value.trim();
+  if (!url || !key) return;
+  await connectSupabase();
+}
+
 async function connectSupabase() {
   const url = els.supabaseUrl.value.trim();
   const anonKey = els.supabaseKey.value.trim();
@@ -104,15 +119,15 @@ async function connectSupabase() {
   setLobbyMessage('正在连接 Supabase...', 'info');
 
   try {
-    const client = window.supabase.createClient(url, anonKey, {
-      auth: { persistSession: false },
-    });
+    const client = window.supabase.createClient(url, anonKey);
+    const uid = await ensureAnonymousSession(client);
 
-    const { error } = await client.from('rooms').select('id').limit(1);
-    if (error) throw error;
+    const { error: testError } = await client.from('rooms').select('id').limit(1);
+    if (testError) throw testError;
 
     state.supabase = client;
     state.connected = true;
+    state.userId = uid;
 
     localStorage.setItem(STORAGE_KEYS.supabaseUrl, url);
     localStorage.setItem(STORAGE_KEYS.supabaseAnonKey, anonKey);
@@ -124,6 +139,7 @@ async function connectSupabase() {
   } catch (err) {
     state.supabase = null;
     state.connected = false;
+    state.userId = null;
     setConnectStatus(false);
     setLobbyMessage(`连接失败：${friendlyError(err)}`, 'error');
   } finally {
@@ -131,21 +147,51 @@ async function connectSupabase() {
   }
 }
 
+async function ensureAnonymousSession(client) {
+  const { data: sessionData, error: sessionError } = await client.auth.getSession();
+  if (sessionError) throw sessionError;
+
+  if (!sessionData.session) {
+    const { error: signInError } = await client.auth.signInAnonymously();
+    if (signInError) throw signInError;
+  }
+
+  const { data: userData, error: userError } = await client.auth.getUser();
+  if (userError) throw userError;
+
+  const user = userData?.user;
+  if (!user?.id) {
+    throw new Error('匿名登录失败，请重试。');
+  }
+
+  return user.id;
+}
+
 async function clearConfig() {
-  localStorage.removeItem(STORAGE_KEYS.supabaseUrl);
-  localStorage.removeItem(STORAGE_KEYS.supabaseAnonKey);
-  els.supabaseUrl.value = '';
-  els.supabaseKey.value = '';
+  try {
+    if (state.supabase) {
+      await state.supabase.auth.signOut();
+    }
+  } catch {
+    // ignore signout failure
+  }
 
   await teardownRealtime();
+
   state.supabase = null;
   state.connected = false;
+  state.userId = null;
   state.session = null;
   state.room = null;
   state.guesses = [];
   state.roomBusy = false;
 
+  localStorage.removeItem(STORAGE_KEYS.supabaseUrl);
+  localStorage.removeItem(STORAGE_KEYS.supabaseAnonKey);
   localStorage.removeItem(STORAGE_KEYS.session);
+
+  els.supabaseUrl.value = '';
+  els.supabaseKey.value = '';
 
   setConnectStatus(false);
   renderScene();
@@ -172,6 +218,7 @@ async function restoreRoomSessionIfAny() {
       localStorage.removeItem(STORAGE_KEYS.session);
       return;
     }
+
     await enterRoom(saved.roomId, saved.role, saved.nickname, true);
     setRoomMessage('已恢复到上次房间。', 'info');
   } catch {
@@ -190,11 +237,16 @@ function validateNickname() {
   return nickname;
 }
 
-async function createRoom() {
-  if (!state.connected || !state.supabase) {
+function ensureConnected() {
+  if (!state.connected || !state.supabase || !state.userId) {
     setLobbyMessage('请先连接 Supabase。', 'error');
-    return;
+    return false;
   }
+  return true;
+}
+
+async function createRoom() {
+  if (!ensureConnected()) return;
 
   const nickname = validateNickname();
   if (!nickname) return;
@@ -209,37 +261,19 @@ async function createRoom() {
   setLobbyMessage('正在创建房间...', 'info');
 
   try {
-    let room = null;
+    const { data, error } = await state.supabase.rpc('create_room', {
+      p_word_length: length,
+      p_host_name: nickname,
+    });
+    if (error) throw normalizeRpcError(error);
 
-    for (let i = 0; i < 8; i += 1) {
-      const roomCode = generateRoomCode();
-      const { data, error } = await state.supabase
-        .from('rooms')
-        .insert({
-          room_code: roomCode,
-          word_length: length,
-          host_name: nickname,
-          status: 'waiting',
-        })
-        .select('*')
-        .single();
-
-      if (!error) {
-        room = data;
-        break;
-      }
-
-      if (error.code !== '23505') {
-        throw error;
-      }
+    const payload = rpcPayload(data);
+    if (!payload?.room_id) {
+      throw new Error('创建房间返回数据异常。');
     }
 
-    if (!room) {
-      throw new Error('房间码冲突过多，请重试。');
-    }
-
-    await enterRoom(room.id, 'host', nickname, false);
-    setRoomMessage('房间创建成功，把房间码发给对方。', 'success');
+    await enterRoom(payload.room_id, payload.role || 'host', nickname, false);
+    setRoomMessage(`房间创建成功，房间码：${payload.room_code || ''}`, 'success');
   } catch (err) {
     setLobbyMessage(`创建失败：${friendlyError(err)}`, 'error');
   } finally {
@@ -248,10 +282,7 @@ async function createRoom() {
 }
 
 async function joinRoom() {
-  if (!state.connected || !state.supabase) {
-    setLobbyMessage('请先连接 Supabase。', 'error');
-    return;
-  }
+  if (!ensureConnected()) return;
 
   const nickname = validateNickname();
   if (!nickname) return;
@@ -266,47 +297,38 @@ async function joinRoom() {
   setLobbyMessage('正在加入房间...', 'info');
 
   try {
-    const { data: room, error } = await state.supabase
-      .from('rooms')
-      .select('*')
-      .eq('room_code', code)
-      .maybeSingle();
+    const { data, error } = await state.supabase.rpc('join_room', {
+      p_room_code: code,
+      p_guest_name: nickname,
+    });
+    if (error) throw normalizeRpcError(error);
 
-    if (error) throw error;
-    if (!room) {
-      setLobbyMessage(`房间不存在：${code}`, 'error');
-      return;
+    const payload = rpcPayload(data);
+    if (!payload?.room_id) {
+      throw new Error('加入房间返回数据异常。');
     }
 
-    let role = 'guest';
-
-    if (room.host_name === nickname) {
-      role = 'host';
-    } else if (room.guest_name === nickname) {
-      role = 'guest';
-    } else if (room.guest_name && room.guest_name !== nickname) {
-      setLobbyMessage('房间已满，请让对方重新创建房间。', 'error');
-      return;
-    } else {
-      const nextStatus = room.host_secret && room.guest_secret ? 'playing' : 'ready';
-      const { error: updateError } = await state.supabase
-        .from('rooms')
-        .update({
-          guest_name: nickname,
-          status: nextStatus,
-        })
-        .eq('id', room.id);
-
-      if (updateError) throw updateError;
-    }
-
-    await enterRoom(room.id, role, nickname, false);
+    await enterRoom(payload.room_id, payload.role || 'guest', nickname, false);
     setRoomMessage('加入房间成功。', 'success');
   } catch (err) {
     setLobbyMessage(`加入失败：${friendlyError(err)}`, 'error');
   } finally {
     setLobbyBusy(false);
   }
+}
+
+function rpcPayload(data) {
+  if (Array.isArray(data)) {
+    return data[0] || null;
+  }
+  return data || null;
+}
+
+function normalizeRpcError(error) {
+  if (error?.code === 'PGRST202') {
+    return new Error('缺少安全函数。请在 Supabase SQL Editor 执行 supabase/schema_secure.sql。');
+  }
+  return error;
 }
 
 async function enterRoom(roomId, role, nickname, restoring) {
@@ -318,7 +340,7 @@ async function enterRoom(roomId, role, nickname, restoring) {
     const exists = await refreshRoomAndGuesses();
 
     if (!exists) {
-      await leaveRoom('房间不存在或已被删除。', true);
+      await leaveRoom('房间不存在或你没有权限访问该房间。', true);
       return;
     }
 
@@ -341,6 +363,7 @@ async function enterRoom(roomId, role, nickname, restoring) {
 
 async function leaveRoom(message, clearSession) {
   await teardownRealtime();
+
   state.session = null;
   state.room = null;
   state.guesses = [];
@@ -366,36 +389,44 @@ async function subscribeRoomRealtime(roomId) {
 
   const channel = state.supabase
     .channel(`room-duel-${roomId}`)
-    .on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: 'rooms',
-      filter: `id=eq.${roomId}`,
-    }, async () => {
-      try {
-        const exists = await refreshRoom();
-        if (!exists) {
-          await leaveRoom('房间已不存在。', true);
-          return;
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'rooms',
+        filter: `id=eq.${roomId}`,
+      },
+      async () => {
+        try {
+          const exists = await refreshRoom();
+          if (!exists) {
+            await leaveRoom('房间已不存在或你没有权限访问。', true);
+            return;
+          }
+          renderRoom();
+        } catch (err) {
+          setRoomMessage(`房间同步失败：${friendlyError(err)}`, 'error');
         }
-        renderRoom();
-      } catch (err) {
-        setRoomMessage(`房间同步失败：${friendlyError(err)}`, 'error');
       }
-    })
-    .on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: 'guesses',
-      filter: `room_id=eq.${roomId}`,
-    }, async () => {
-      try {
-        await refreshGuesses();
-        renderRoom();
-      } catch (err) {
-        setRoomMessage(`猜词同步失败：${friendlyError(err)}`, 'error');
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'guesses',
+        filter: `room_id=eq.${roomId}`,
+      },
+      async () => {
+        try {
+          await refreshGuesses();
+          renderRoom();
+        } catch (err) {
+          setRoomMessage(`猜词同步失败：${friendlyError(err)}`, 'error');
+        }
       }
-    });
+    );
 
   channel.subscribe((status) => {
     if (status === 'SUBSCRIBED') {
@@ -412,8 +443,9 @@ async function teardownRealtime() {
   try {
     await state.supabase.removeChannel(state.channel);
   } catch {
-    // ignore removal failure for best-effort cleanup
+    // ignore cleanup failure
   }
+
   state.channel = null;
 }
 
@@ -428,13 +460,11 @@ async function refreshRoom() {
 
   const { data, error } = await state.supabase
     .from('rooms')
-    .select('*')
+    .select(ROOM_SELECT_COLUMNS)
     .eq('id', state.session.roomId)
     .maybeSingle();
 
-  if (error) {
-    throw error;
-  }
+  if (error) throw error;
 
   state.room = data || null;
   return !!data;
@@ -445,13 +475,11 @@ async function refreshGuesses() {
 
   const { data, error } = await state.supabase
     .from('guesses')
-    .select('*')
+    .select('id,room_id,player_slot,guess,marks,attempt_no,created_at')
     .eq('room_id', state.session.roomId)
     .order('id', { ascending: true });
 
-  if (error) {
-    throw error;
-  }
+  if (error) throw error;
 
   state.guesses = Array.isArray(data) ? data : [];
 }
@@ -469,24 +497,23 @@ function renderScene() {
 function renderRoom() {
   const room = state.room;
   const session = state.session;
-
   if (!room || !session) return;
 
   const isHost = session.role === 'host';
   const selfSlot = isHost ? 1 : 2;
 
-  const selfSecretCol = isHost ? 'host_secret' : 'guest_secret';
-  const opponentSecretCol = isHost ? 'guest_secret' : 'host_secret';
-  const selfSolvedCol = isHost ? 'host_solved_attempt' : 'guest_solved_attempt';
-  const opponentSolvedCol = isHost ? 'guest_solved_attempt' : 'host_solved_attempt';
+  const selfSecretSet = isHost ? !!room.host_secret_set : !!room.guest_secret_set;
+  const opponentSecretSet = isHost ? !!room.guest_secret_set : !!room.host_secret_set;
+
+  const selfSolvedAttempt = isHost
+    ? room.host_solved_attempt || null
+    : room.guest_solved_attempt || null;
+  const opponentSolvedAttempt = isHost
+    ? room.guest_solved_attempt || null
+    : room.host_solved_attempt || null;
 
   const wordLength = Number(room.word_length) || 5;
   const status = String(room.status || 'waiting');
-
-  const selfSecretSet = !!room[selfSecretCol];
-  const opponentSecretSet = !!room[opponentSecretCol];
-  const selfSolvedAttempt = room[selfSolvedCol] || null;
-  const opponentSolvedAttempt = room[opponentSolvedCol] || null;
 
   els.roomCodeShow.textContent = room.room_code || '------';
   els.roomMeta.textContent = `状态：${statusLabel(status)} · 单词长度：${wordLength}`;
@@ -505,23 +532,28 @@ function renderRoom() {
   appendStat('对方密词', opponentSecretSet ? '已提交' : '未提交', els.roomStats);
   appendStat('对局结果', winner || '进行中', els.roomStats);
 
-  els.secretWord.placeholder = `输入 ${wordLength} 位英文字母`;
-  els.guessWord.placeholder = `输入 ${wordLength} 位英文字母`;
-
-  els.submitSecretBtn.disabled = state.roomBusy || selfSecretSet || status === 'finished';
-  els.submitSecretBtn.textContent = selfSecretSet ? '已提交密词' : '提交密词';
-
-  const canGuess = status !== 'finished' && opponentSecretSet && !selfSolvedAttempt;
-  els.submitGuessBtn.disabled = state.roomBusy || !canGuess;
-
-  renderGuessPanels(selfSlot);
-
   if (winner) {
     const banner = document.createElement('div');
     banner.className = 'winner-banner';
     banner.textContent = winner;
     els.roomStats.appendChild(banner);
   }
+
+  els.secretWord.placeholder = `输入 ${wordLength} 位英文字母`;
+  els.guessWord.placeholder = `输入 ${wordLength} 位英文字母`;
+
+  const canSubmitSecret = !state.roomBusy && !selfSecretSet && status !== 'finished';
+  const canGuess =
+    !state.roomBusy &&
+    status !== 'finished' &&
+    opponentSecretSet &&
+    !selfSolvedAttempt;
+
+  els.submitSecretBtn.disabled = !canSubmitSecret;
+  els.submitSecretBtn.textContent = selfSecretSet ? '已提交密词' : '提交密词';
+  els.submitGuessBtn.disabled = !canGuess;
+
+  renderGuessPanels(selfSlot);
 }
 
 function appendStat(label, value, container) {
@@ -544,18 +576,17 @@ async function submitSecretWord() {
 
   const room = state.room;
   const isHost = state.session.role === 'host';
-  const selfSecretCol = isHost ? 'host_secret' : 'guest_secret';
   const wordLength = Number(room.word_length) || 5;
 
-  const secret = els.secretWord.value.trim().toLowerCase();
-
-  if (!isEnglishWord(secret) || secret.length !== wordLength) {
-    setRoomMessage(`秘密单词必须是 ${wordLength} 位英文字母。`, 'error');
+  const selfSecretSet = isHost ? !!room.host_secret_set : !!room.guest_secret_set;
+  if (selfSecretSet) {
+    setRoomMessage('你已经提交过秘密单词了。', 'info');
     return;
   }
 
-  if (room[selfSecretCol]) {
-    setRoomMessage('你已经提交过秘密单词了。', 'info');
+  const secret = els.secretWord.value.trim().toLowerCase();
+  if (!isEnglishWord(secret) || secret.length !== wordLength) {
+    setRoomMessage(`秘密单词必须是 ${wordLength} 位英文字母。`, 'error');
     return;
   }
 
@@ -563,19 +594,22 @@ async function submitSecretWord() {
   setRoomMessage('正在提交秘密单词...', 'info');
 
   try {
-    const { error } = await state.supabase
-      .from('rooms')
-      .update({ [selfSecretCol]: secret })
-      .eq('id', room.id);
+    const { data, error } = await state.supabase.rpc('submit_secret', {
+      p_room_id: room.id,
+      p_secret: secret,
+    });
+    if (error) throw normalizeRpcError(error);
 
-    if (error) throw error;
-
-    await syncRoomStatus(room.id);
     await refreshRoom();
     renderRoom();
 
     els.secretWord.value = '';
-    setRoomMessage('秘密单词已提交。', 'success');
+    const payload = rpcPayload(data);
+    if (payload?.status) {
+      setRoomMessage(`秘密单词已提交。当前状态：${statusLabel(payload.status)}。`, 'success');
+    } else {
+      setRoomMessage('秘密单词已提交。', 'success');
+    }
   } catch (err) {
     setRoomMessage(`提交失败：${friendlyError(err)}`, 'error');
   } finally {
@@ -588,12 +622,13 @@ async function submitGuessWord() {
 
   const room = state.room;
   const isHost = state.session.role === 'host';
-  const selfSlot = isHost ? 1 : 2;
-
-  const opponentSecretCol = isHost ? 'guest_secret' : 'host_secret';
-  const selfSolvedCol = isHost ? 'host_solved_attempt' : 'guest_solved_attempt';
-
   const wordLength = Number(room.word_length) || 5;
+
+  const selfSolvedAttempt = isHost
+    ? room.host_solved_attempt || null
+    : room.guest_solved_attempt || null;
+  const opponentSecretSet = isHost ? !!room.guest_secret_set : !!room.host_secret_set;
+
   const guess = els.guessWord.value.trim().toLowerCase();
 
   if (!isEnglishWord(guess) || guess.length !== wordLength) {
@@ -606,85 +641,40 @@ async function submitGuessWord() {
     return;
   }
 
-  if (room[selfSolvedCol]) {
+  if (selfSolvedAttempt) {
     setRoomMessage('你已经猜中，等待对方完成。', 'info');
     return;
   }
 
-  const target = room[opponentSecretCol];
-  if (!target) {
+  if (!opponentSecretSet) {
     setRoomMessage('对方还没提交秘密单词。', 'info');
     return;
   }
-
-  const myAttempts = state.guesses.filter((g) => Number(g.player_slot) === selfSlot).length;
-  const nextAttempt = myAttempts + 1;
-
-  const marks = scoreGuess(guess, target);
 
   setRoomBusy(true);
   setRoomMessage('正在提交猜词...', 'info');
 
   try {
-    const { error: insertError } = await state.supabase.from('guesses').insert({
-      room_id: room.id,
-      player_slot: selfSlot,
-      guess,
-      marks,
-      attempt_no: nextAttempt,
+    const { data, error } = await state.supabase.rpc('submit_guess', {
+      p_room_id: room.id,
+      p_guess: guess,
     });
+    if (error) throw normalizeRpcError(error);
 
-    if (insertError) throw insertError;
+    const payload = rpcPayload(data);
 
-    if (guess === target) {
-      const { error: solvedError } = await state.supabase
-        .from('rooms')
-        .update({ [selfSolvedCol]: nextAttempt })
-        .eq('id', room.id);
-      if (solvedError) throw solvedError;
-    }
-
-    await syncRoomStatus(room.id);
     await refreshRoomAndGuesses();
-
     els.guessWord.value = '';
-    setRoomMessage(guess === target ? '猜中啦！等待对方完成。' : '已提交本次猜词。', 'success');
+
+    if (payload?.solved) {
+      setRoomMessage('猜中啦！等待对方完成。', 'success');
+    } else {
+      setRoomMessage('已提交本次猜词。', 'success');
+    }
   } catch (err) {
     setRoomMessage(`提交失败：${friendlyError(err)}`, 'error');
   } finally {
     setRoomBusy(false);
-  }
-}
-
-async function syncRoomStatus(roomId) {
-  if (!state.supabase) return;
-
-  const { data, error } = await state.supabase
-    .from('rooms')
-    .select('id,status,host_secret,guest_secret,host_solved_attempt,guest_solved_attempt')
-    .eq('id', roomId)
-    .single();
-
-  if (error) throw error;
-
-  const updates = {};
-
-  if (
-    data.host_secret &&
-    data.guest_secret &&
-    data.status !== 'playing' &&
-    data.status !== 'finished'
-  ) {
-    updates.status = 'playing';
-  }
-
-  if (data.host_solved_attempt && data.guest_solved_attempt && data.status !== 'finished') {
-    updates.status = 'finished';
-  }
-
-  if (Object.keys(updates).length > 0) {
-    const { error: updateError } = await state.supabase.from('rooms').update(updates).eq('id', roomId);
-    if (updateError) throw updateError;
   }
 }
 
@@ -751,6 +741,10 @@ function normalizeMarks(raw) {
     }
   }
 
+  if (raw && typeof raw === 'object' && Symbol.iterator in raw) {
+    return Array.from(raw, (v) => String(v));
+  }
+
   return [];
 }
 
@@ -787,7 +781,7 @@ function statusLabel(status) {
     case 'finished':
       return '已结束';
     default:
-      return status;
+      return status || '未知状态';
   }
 }
 
@@ -815,44 +809,6 @@ function winnerText(room) {
   return `胜者：${winnerName}`;
 }
 
-function generateRoomCode() {
-  let out = '';
-  for (let i = 0; i < 6; i += 1) {
-    const idx = Math.floor(Math.random() * ROOM_CODE_CHARS.length);
-    out += ROOM_CODE_CHARS[idx];
-  }
-  return out;
-}
-
-function scoreGuess(guess, target) {
-  const marks = new Array(guess.length).fill('absent');
-  const remaining = new Map();
-
-  for (let i = 0; i < guess.length; i += 1) {
-    const g = guess[i];
-    const t = target[i];
-
-    if (g === t) {
-      marks[i] = 'correct';
-    } else {
-      remaining.set(t, (remaining.get(t) || 0) + 1);
-    }
-  }
-
-  for (let i = 0; i < guess.length; i += 1) {
-    if (marks[i] === 'correct') continue;
-
-    const g = guess[i];
-    const left = remaining.get(g) || 0;
-    if (left > 0) {
-      marks[i] = 'present';
-      remaining.set(g, left - 1);
-    }
-  }
-
-  return marks;
-}
-
 function isEnglishWord(text) {
   return /^[a-zA-Z]+$/.test(text);
 }
@@ -861,6 +817,7 @@ function friendlyError(err) {
   if (!err) return '未知错误';
   if (typeof err === 'string') return err;
   if (err.message) return err.message;
+  if (err.error_description) return err.error_description;
   return JSON.stringify(err);
 }
 
